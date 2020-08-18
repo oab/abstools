@@ -14,7 +14,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - The new function `ms_since_model_start` returns an integer containing the elapsed time in milliseonds since the model was started.
 
+- In the Erlang backend, it is now possible to calculate the result of a function from the result of a query to a provided SQLite database.  The preliminary syntax for this is `def Int f() = builtin(sqlite3, "db.sqlite3", "SELECT i FROM t");`
+
 ### Changed
+
+- Compiling the toolchain from source code now needs a C compiler, in addition to a Java JDK >= 8 and Erlang >= 22.
 
 - Function calls in the erlang backend are significantly faster via removal of the check for pending garbage collection at the beginning of each function body.  (Note that garbage collection, i.e., removing unreferenced futures and objects, happens rarely, so the increased waiting time when entering gc caused by this change is not paid often.)
 

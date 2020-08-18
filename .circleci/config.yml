@@ -22,6 +22,10 @@ jobs:
     steps:
       - checkout:
           path: ~/repo
+
+      # cc needed to compile erlang backend esqlite library
+      - run: apt-get -y install build-essential
+
       - run: chmod +x ../gradlew
 
         # Download and cache dependencies
