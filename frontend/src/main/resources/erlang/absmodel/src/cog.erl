@@ -24,6 +24,8 @@
          block_current_task_for_bandwidth/4,
          block_current_task_for_future/3]).
 -export([return_token/5]).
+%% functions being called by a dc whose object state we're holding.
+-export([consume_resource_on_dc/7]).
 %% Called by cog_monitor
 -include_lib("../include/abs_types.hrl").
 
@@ -152,7 +154,7 @@ start(ParentCog, DC, Scheduler)->
     gc:register_cog(NewCogRef),
     NewCog.
 
-add_task(#cog{ref=CogRef},TaskType,Future,CalleeObj,Args,Info,Stack) ->
+add_task(#cog{ref=CogRef},TaskType,Future,CalleeObj,Args,Info,_Stack) ->
     gen_statem:call(CogRef, {new_task,TaskType,Future,CalleeObj,Args,Info,self(),false,{started, TaskType}}).
 
 add_main_task(_Cog=#cog{ref=CogRef},Args,Info)->
@@ -161,7 +163,7 @@ add_main_task(_Cog=#cog{ref=CogRef},Args,Info)->
 
 create_task(null,_Method,_Params, _Info, _CallerCog, _Stack) ->
     throw(dataNullPointerException);
-create_task(Callee=#object{oid=Object,cog=Cog=#cog{ref=CogRef}},Method,Params, Info, CallerCog, ReturnFuture) ->
+create_task(Callee=#object{cog=Cog},Method,Params, Info, CallerCog, ReturnFuture) ->
     %% Create the schedule event based on the invocation event; this is because
     %% we don't have access to the caller id from the callee.
     #event{caller_id=Cid, local_id=Lid, name=Name} = cog:register_invocation(CallerCog, Method),
@@ -171,14 +173,14 @@ create_task(Callee=#object{oid=Object,cog=Cog=#cog{ref=CogRef}},Method,Params, I
                           true -> gen_statem:start(future,[Params,ScheduleEvent,true], []);
                           _ -> {ok, null}
                       end,
-    TaskRef=cog:add_task(Cog,async_call_task, FutureRef, Callee, [Method|Params], NewInfo#task_info{this=Callee,destiny=FutureRef}, Params),
+    _TaskRef=cog:add_task(Cog,async_call_task, FutureRef, Callee, [Method|Params], NewInfo#task_info{this=Callee,destiny=FutureRef}, Params),
     FutureRef.
 
-create_model_api_task(Callee=#object{oid=Object,cog=Cog=#cog{ref=CogRef}}, Method, Params, Info) ->
+create_model_api_task(Callee=#object{cog=Cog}, Method, Params, Info) ->
     ScheduleEvent = #event{type=schedule, caller_id=modelapi, local_id={Method, Params}, name=Method},
     NewInfo = Info#task_info{event=ScheduleEvent},
     {ok, FutureRef} = gen_statem:start(future,[Params,ScheduleEvent,false], []),
-    TaskRef=cog:add_task(Cog,async_call_task, FutureRef, Callee, [Method|Params], NewInfo#task_info{this=Callee,destiny=FutureRef}, Params),
+    _TaskRef=cog:add_task(Cog,async_call_task, FutureRef, Callee, [Method|Params], NewInfo#task_info{this=Callee,destiny=FutureRef}, Params),
     FutureRef.
 
 new_object(Cog=#cog{ref=CogRef}, Class, ObjectState) ->
@@ -319,7 +321,7 @@ suspend_current_task_for_duration(Cog=#cog{ref=CogRef},MMin,MMax,Stack) ->
             ok
     end.
 
-suspend_current_task_for_future(Cog=#cog{ref=CogRef},Future,Stack) ->
+suspend_current_task_for_future(Cog,Future,Stack) ->
     return_token(Cog, self(), waiting, (get(task_info))#task_info{wait_reason={waiting_on_future, Future}}, get(this)),
     task:wait_for_token(Cog, [Future | Stack]).
 
@@ -332,7 +334,7 @@ block_current_task_for_duration(Cog=#cog{ref=CogRef},MMin,MMax,Stack) ->
             ok
     end.
 
-block_current_task_for_cpu(Cog=#cog{ref=CogRef}, Amount, Stack) ->
+block_current_task_for_cpu(_Cog=#cog{ref=CogRef}, Amount, Stack) ->
     gen_statem:cast(CogRef, {task_blocked_for_resource,
                              self(),
                              get(task_info),
@@ -340,7 +342,7 @@ block_current_task_for_cpu(Cog=#cog{ref=CogRef}, Amount, Stack) ->
                              cpu, Amount}),
     task:wait_for_token(CogRef, Stack).
 
-block_current_task_for_bandwidth(Cog=#cog{ref=CogRef,dcobj=DC},
+block_current_task_for_bandwidth(_Cog=#cog{ref=CogRef,dcobj=DC},
                                  _Callee=#object{cog=#cog{dcobj=TargetDC}},
                                  Amount, Stack) ->
     case DC == TargetDC of
@@ -354,7 +356,7 @@ block_current_task_for_bandwidth(Cog=#cog{ref=CogRef,dcobj=DC},
                                      bw, Amount}),
             task:wait_for_token(CogRef, Stack)
     end;
-block_current_task_for_bandwidth(Cog=#cog{ref=CogRef}, null,
+block_current_task_for_bandwidth(_Cog=#cog{ref=CogRef}, null,
                                  Amount, Stack) ->
     %% KLUDGE: on return statements, we don't know where the result is sent.
     %% Consume bandwidth now -- fix this once the semantics are resolved
@@ -365,13 +367,19 @@ block_current_task_for_bandwidth(Cog=#cog{ref=CogRef}, null,
                              bw, Amount}),
     task:wait_for_token(CogRef, Stack).
 
-block_current_task_for_future(#cog{ref=CogRef}, Future, Stack) ->
+block_current_task_for_future(_Cog=#cog{ref=CogRef}, Future, _Stack) ->
     gen_statem:cast(CogRef, {task_blocked_for_future,
                              self(),
                              %% TODO: pass the wait_reason in another way
                              (get(task_info))#task_info{wait_reason={waiting_on_future, Future}},
                              get(this),
                              Future}).
+
+consume_resource_on_dc(_Cog=#cog{ref=CogRef}, DCRef, DCOid, ConsumingCog, ConsumingTask, Resourcetype, Amount_raw) ->
+    gen_statem:cast(CogRef, {consume_resource_on_dc, DCRef, DCOid, ConsumingCog, ConsumingTask, Resourcetype, Amount_raw});
+consume_resource_on_dc(CogRef, DCRef, DCOid, ConsumingCog, ConsumingTask, Resourcetype, Amount_raw) ->
+    gen_statem:cast(CogRef, {consume_resource_on_dc, DCRef, DCOid, ConsumingCog, ConsumingTask, Resourcetype, Amount_raw}).
+
 
 return_token(#cog{ref=Cog}, TaskRef, State, TaskInfo, ObjectState) ->
     receive
@@ -389,14 +397,14 @@ return_token(#cog{ref=Cog}, TaskRef, State, TaskInfo, ObjectState) ->
                                       %% indicates we shouldn’t do that.
                                       wait_reason=none}).
 
-task_poll_is_ready(#cog{ref=Cog}, TaskRef, TaskInfo) ->
-    Cog ! {TaskRef, true, TaskInfo}.
+task_poll_is_ready(#cog{ref=Cog}, TaskRef, ReadSet) ->
+    Cog ! {TaskRef, true, ReadSet}.
 
-task_poll_is_not_ready(#cog{ref=Cog}, TaskRef, TaskInfo) ->
-    Cog ! {TaskRef, false, TaskInfo}.
+task_poll_is_not_ready(#cog{ref=Cog}, TaskRef, ReadSet) ->
+    Cog ! {TaskRef, false, ReadSet}.
 
-task_poll_has_crashed(#cog{ref=Cog}, TaskRef, TaskInfo) ->
-    Cog ! {TaskRef, crashed, TaskInfo}.
+task_poll_has_crashed(#cog{ref=Cog}, TaskRef, ReadSet) ->
+    Cog ! {TaskRef, crashed, ReadSet}.
 
 submit_references(#cog{ref=CogRef}, Refs) ->
     gen_statem:cast(CogRef, {references, self(), Refs});
@@ -486,7 +494,7 @@ handle_event({call, From}, {sync_task_with_object, Oid, TaskRef}, _StateName,
              Data#data{fresh_objects=maps:put(Oid, [TaskRef | Tasks], FreshObjects)},
              {reply, From, uninitialized}}
     end;
-handle_event({call, From}, {get_dc_ref, Oid}, _StateName, Data=#data{dcs=DCs}) ->
+handle_event({call, From}, {get_dc_ref, Oid}, _StateName, _Data=#data{dcs=DCs}) ->
     {keep_state_and_data, {reply, From, maps:get(Oid, DCs)}};
 handle_event({call, From}, {set_dc, DC, DCRef}, _StateName,
             Data=#data{dc=null, dcref=none}) ->
@@ -501,15 +509,15 @@ handle_event({call, From}, {new_object_state, ObjectState}, _StateName,
                            object_counter=Oid},
      {reply, From, Oid}};
 
-handle_event(cast, {future_is_ready, FutureRef}, _StateName, Data) ->
+handle_event(cast, {future_is_ready, FutureRef}, _StateName, _Data) ->
     %% This is the common case (we are not idle, just confirm to the future).
     future:confirm_wait_unblocked(FutureRef, {waiting_cog, self()}),
     keep_state_and_data;
 
-%% Record/replay a method invocation, and return a stable identifier for the
-%% invocation.
 handle_event({call, From}, {register_invocation, Method}, _StateName,
              Data=#data{next_stable_id=N, id=Id, recorded=Recorded}) ->
+    %% Record/replay a method invocation, and return a stable
+    %% identifier for the invocation.
     Event = #event{type=invocation, caller_id=Id, local_id=N, name=Method},
     NewData = Data#data{next_stable_id=N+1, recorded=[Event | Recorded]},
     {keep_state, NewData, {reply, From, Event}};
@@ -525,11 +533,9 @@ handle_event({call, From}, {register_new_object, Class}, _StateName,
 
 handle_event({call, From}, {register_new_local_object, Class}, _StateName,
              Data=#data{next_stable_id=N, id=Id, recorded=Recorded}) ->
-    Event1 = #event{type=new_object, caller_id=Id, local_id=N, name=Class},
-    Event2 = #event{type=schedule, caller_id=Id, local_id=N, name=init},
-    NewRecorded = [Event2, Event1 | Recorded],
-    NewData = Data#data{next_stable_id=N+1, recorded=NewRecorded},
-    {keep_state, NewData, {reply, From, Event1}};
+    Event = #event{type=new_object, caller_id=Id, local_id=N, name=Class},
+    NewData = Data#data{next_stable_id=N+1, recorded=[Event | Recorded]},
+    {keep_state, NewData, {reply, From, Event}};
 
 handle_event({call, From}, {register_future_read, Event}, _StateName,
              Data=#data{recorded=Recorded}) ->
@@ -542,7 +548,7 @@ handle_event({call, From}, {register_await_future_complete, Event}, _StateName,
     {keep_state, Data#data{recorded=NewRecorded}, {reply, From, ok}};
 
 handle_event({call, From}, get_trace, _StateName,
-             Data=#data{id=Id, recorded=Recorded}) ->
+             _Data=#data{id=Id, recorded=Recorded}) ->
     {keep_state_and_data, {reply, From, {Id, Recorded}}};
 
 handle_event(cast, {new_dc, Oid}, _StateName, Data=#data{dcs=DCs}) ->
@@ -564,7 +570,54 @@ handle_event(cast, {object_dead, Oid}, _StateName, Data=#data{object_states=Obje
     end,
     {keep_state, Data#data{object_states=maps:remove(Oid, NewStates)}};
 
-handle_event({call, From}, Event, StateName, Data) ->
+handle_event(cast, {consume_resource_on_dc, DCRef, DCOid, ConsumingCog, ConsumingTask, Resourcetype, Amount_raw},
+            _StateName, Data=#data{object_states=ObjectStates}) ->
+    %% Silently fix negative resource amounts, treat them as 0
+    Requested = rationals:max(rationals:to_r(Amount_raw), 0),
+    C=class_ABS_DC_DeploymentComponent,
+    OState=maps:get(DCOid, ObjectStates, dead),
+    Initialized=C:get_val_internal(OState, 'initialized'),
+    case Initialized of
+        null ->
+            %% The init block of the DC object has not run yet (should not
+            %% happen) - just tell the dc to enqueue the request.
+            dc:enqueue_consume_resource(DCRef, ConsumingCog, ConsumingTask, Resourcetype, Amount_raw),
+            {keep_state_and_data};
+        true ->
+            ResourceVarCurrent=dc:var_current_for_resourcetype(Resourcetype),
+            ResourceVarMax=dc:var_max_for_resourcetype(Resourcetype),
+            %% We modify the DC object state directly, which looks
+            %% scary - but we do not reach this point when we're in
+            %% state `running' so no one else can overwrite the state
+            %% with an outdated version.
+            Total=C:get_val_internal(OState,ResourceVarMax),
+            Consumed=rationals:to_r(C:get_val_internal(OState,ResourceVarCurrent)),
+            Available=case Total of
+                          dataInfRat -> Requested;
+                          {dataFin, Total1} -> rationals:sub(Total1, Consumed)
+                      end,
+            case rationals:is_greater(Requested, Available) of
+                true ->
+                    %% We need more than is available - get what we can and
+                    %% queue the rest.
+                    Remaining = rationals:sub(Requested, Available),
+                    NewConsumed = rationals:add(Consumed, Available),
+                    %% Do not set current to total since that is of type InfRat
+                    OState1=C:set_val_internal(OState,ResourceVarCurrent, NewConsumed),
+                    dc:enqueue_consume_resource(DCRef, ConsumingCog, ConsumingTask, Resourcetype, Remaining),
+                    {keep_state,
+                     Data#data{object_states=maps:put(DCOid, OState1, ObjectStates)}};
+                false ->
+                    %% Do not inform cog_monitor that cog is blocked; just
+                    %% unblock task here
+                    NewConsumed=rationals:add(Consumed, Requested),
+                    OState1=C:set_val_internal(OState,ResourceVarCurrent, NewConsumed),
+                    cog:task_is_runnable(ConsumingCog, ConsumingTask),
+                    {keep_state,
+                     Data#data{object_states=maps:put(DCOid, OState1, ObjectStates)}}
+            end
+    end;
+handle_event({call, _From}, _Event, _StateName, Data) ->
     {stop, not_supported, Data};
 handle_event(cast, _Event, _StateName, Data) ->
     {stop, not_supported, Data};
@@ -575,7 +628,7 @@ handle_event(cast, _Event, _StateName, Data) ->
 %% TODO: in `task_blocked', consider handling crash by rescheduling.  This
 %% should not happen since a blocked process does not execute user-defined ABS
 %% code and should not be able to crash.
-handle_event(info, {'EXIT',TaskRef,_Reason}, StateName,
+handle_event(info, {'EXIT',TaskRef,_Reason}, _StateName,
             Data=#data{running_task=R,runnable_tasks=Run, polling_tasks=Pol,
                        waiting_tasks=Wai, new_tasks=New,
                        task_infos=TaskInfos}) ->
@@ -630,11 +683,11 @@ start_new_task(DC,TaskType,Future,CalleeObj,Args,Info,Sender,Notify,Cookie)->
     end,
     ArrivalInfo#task_info{pid=Ref}.
 
-choose_runnable_task(Scheduler, Candidates, TaskInfos, _ObjectStates, [Event1 | _]) ->
+choose_runnable_task(_Scheduler, Candidates, TaskInfos, _ObjectStates, [Event1 | _]) ->
     %% Assume Event1 and Event2 are both of type schedule. Compare only their
     %% caller- and local ids.
     Now = builtin:float(ok, clock:now()),
-    Candidate = [Task || {Task, Info=#task_info{event=Event2}} <- maps:to_list(TaskInfos),
+    Candidate = [Task || {Task, _Info=#task_info{event=Event2}} <- maps:to_list(TaskInfos),
                          Event2#event.caller_id == Event1#event.caller_id,
                          Event2#event.local_id == Event1#event.local_id],
     case Candidate of
@@ -682,19 +735,26 @@ choose_runnable_task(Scheduler, Candidates, TaskInfos, ObjectStates, []) ->
             end
     end.
 
+get_polling_status(P, PollingStates) ->
+    case maps:get(P, PollingStates) of
+        {Status, _ReadSet} -> Status
+    end.
+
 get_candidate_set(RunnableTasks, PollingTasks, PollingStates) ->
-    Ready = fun (X) -> maps:get(X, PollingStates) == true end,
+    Ready = fun (X) -> get_polling_status(X, PollingStates) == true end,
     gb_sets:union(RunnableTasks, gb_sets:filter(Ready, PollingTasks)).
 
 record_termination_or_suspension(R, TaskInfos, PollingStates, NewPollingStates, TaskState, Recorded) ->
-    Changed = [P || {P, V} <- maps:to_list(NewPollingStates),
-                    not(maps:is_key(P, PollingStates)) orelse V /= maps:get(P, PollingStates)],
-    AwaitEvents = lists:filtermap(fun (P) -> #task_info{event=E} = maps:get(P, TaskInfos),
-                                             case maps:get(P, NewPollingStates) of
-                                                 true -> {true, E#event{type=await_enable}};
-                                                 false -> {true, E#event{type=await_disable}};
-                                                 _ -> false
-                                             end
+    Changed = [{P, V} || {P, V} <- maps:to_list(NewPollingStates),
+                         not(maps:is_key(P, PollingStates)) orelse V /= maps:get(P, PollingStates)],
+    AwaitEvents = lists:filtermap(fun ({P, {Status, ReadSet}}) ->
+                                          #task_info{event=E} = maps:get(P, TaskInfos),
+                                          E2 = E#event{reads=ReadSet, writes=ordsets:new()},
+                                          case Status of
+                                              true -> {true, E2#event{type=await_enable}};
+                                              false -> {true, E2#event{type=await_disable}};
+                                              _ -> false
+                                          end
                                   end, Changed),
     TaskInfo = maps:get(R, TaskInfos),
     LastEvent = TaskInfo#task_info.event,
@@ -714,9 +774,9 @@ poll_waiting(Tasks, TaskInfos, ObjectStates) ->
                   end, PollingTasks),
     lists:foldl(fun (R, PollingStates) ->
                         receive
-                            {R, true, TaskInfo} -> maps:put(R, true, PollingStates);
-                            {R, false, TaskInfo} -> maps:put(R, false, PollingStates);
-                            {R, crashed, TaskInfo} -> maps:put(R, crashed, PollingStates)
+                            {R, true, ReadSet} -> maps:put(R, {true, ReadSet}, PollingStates);
+                            {R, false, ReadSet} -> maps:put(R, {false, ReadSet}, PollingStates);
+                            {R, crashed, ReadSet} -> maps:put(R, {crashed, ReadSet}, PollingStates)
                         end
                 end, #{}, PollingTasks).
 
@@ -767,7 +827,7 @@ no_task_schedulable({call, From}, Event, Data) ->
 no_task_schedulable(cast, {task_runnable, TaskRef, ConfirmTask},
                     Data=#data{waiting_tasks=Wai,polling_tasks=Pol,
                                runnable_tasks=Run, new_tasks=New,
-                               scheduler=Scheduler, dc=DC, dcref=DCRef,
+                               scheduler=Scheduler, dcref=DCRef,
                                task_infos=TaskInfos,
                                object_states=ObjectStates,
                                polling_states=PollingStates,
@@ -797,7 +857,7 @@ no_task_schedulable(cast, {task_runnable, TaskRef, ConfirmTask},
             #task_info{event=Event} = maps:get(T, TaskInfos),
             #event{caller_id=Cid, local_id=Lid, name=Name} = Event,
             NewRecorded = [#event{type=schedule, caller_id=Cid, local_id=Lid, name=Name} | Recorded],
-            NewReplaying = case Replaying of [] -> []; [X | Rest] -> Rest end,
+            NewReplaying = case Replaying of [] -> []; [_X | Rest] -> Rest end,
 
             dc:cog_active(DCRef, self()),
             send_token(token, T, TaskInfos, ObjectStates),
@@ -812,15 +872,19 @@ no_task_schedulable(cast, {task_runnable, TaskRef, ConfirmTask},
                        new_tasks=NewNewTasks, recorded=NewRecorded, replaying=NewReplaying}}
     end;
 no_task_schedulable(cast, {future_is_ready, FutureRef},
-                    Data=#data{waiting_tasks=Wai,polling_tasks=Pol,
+                    Data=#data{polling_tasks=Pol,
                                runnable_tasks=Run, new_tasks=New,
-                               scheduler=Scheduler, dc=DC, dcref=DCRef,
+                               scheduler=Scheduler, dcref=DCRef,
                                task_infos=TaskInfos,
                                object_states=ObjectStates,
-                               polling_states=PollingStates,
+                               polling_states=_PollingStates,
                                recorded=Recorded,replaying=Replaying}) ->
-    %% We might have a task waiting on `FutureRef' that’s stored in a field.
-    %% Try a normal scheduling round.
+    %% We might have a task waiting on `FutureRef' that’s stored in a
+    %% field, and hence might be re-assigned to a different future
+    %% while the task is waiting.  (If the task is waiting on a future
+    %% stored in a local variable, the future will wake it up
+    %% directly.)  Try a normal scheduling round and see if anyone
+    %% unblocks.
     NewPollingStates=poll_waiting(Pol, TaskInfos, ObjectStates),
     Candidates = get_candidate_set(Run, Pol, NewPollingStates),
     T = choose_runnable_task(Scheduler, Candidates, TaskInfos, ObjectStates, Replaying),
@@ -840,7 +904,7 @@ no_task_schedulable(cast, {future_is_ready, FutureRef},
             #task_info{event=Event} = maps:get(T, TaskInfos),
             #event{caller_id=Cid, local_id=Lid, name=Name} = Event,
             NewRecorded = [#event{type=schedule, caller_id=Cid, local_id=Lid, name=Name} | Recorded],
-            NewReplaying = case Replaying of [] -> []; [X | Rest] -> Rest end,
+            NewReplaying = case Replaying of [] -> []; [_X | Rest] -> Rest end,
 
             dc:cog_active(DCRef, self()),
             send_token(token, T, TaskInfos, ObjectStates),
@@ -899,8 +963,8 @@ task_running({call, From}, {token, R, TaskState, TaskInfo, ObjectState},
     NewPolling = case NewTaskState of waiting_poll -> gb_sets:add_element(R, Pol);
                      _ -> Pol end,
     NewPollingStates = poll_waiting(NewPolling, NewTaskInfos, NewObjectStates),
-    PollReadySet = gb_sets:filter(fun (X) -> maps:get(X, NewPollingStates) == true end, NewPolling),
-    PollCrashedSet = gb_sets:filter(fun (X) -> maps:get(X, NewPollingStates) == crashed end, NewPolling),
+    PollReadySet = gb_sets:filter(fun (X) -> get_polling_status(X, NewPollingStates) == true end, NewPolling),
+    PollCrashedSet = gb_sets:filter(fun (X) -> get_polling_status(X, NewPollingStates) == crashed end, NewPolling),
     %% Record/replay termination or suspension
     NewRecorded = record_termination_or_suspension(R, NewTaskInfos, PollingStates, NewPollingStates, TaskState, Recorded),
 
@@ -928,7 +992,7 @@ task_running({call, From}, {token, R, TaskState, TaskInfo, ObjectState},
                     #task_info{event=Event2} = maps:get(T, NewTaskInfos),
                     #event{caller_id=Cid2, local_id=Lid2, name=Name2} = Event2,
                     NewRecorded2 = [#event{type=schedule, caller_id=Cid2, local_id=Lid2, name=Name2} | NewRecorded],
-                    NewReplaying = case Replaying of [] -> []; [X | Rest] -> Rest end,
+                    NewReplaying = case Replaying of [] -> []; [_X | Rest] -> Rest end,
 
                     send_token(token, T, NewTaskInfos, NewObjectStates),
                     {keep_state,
@@ -983,7 +1047,7 @@ task_running({call, From}, {token, R, TaskState, TaskInfo, ObjectState},
 task_running({call, From}, Event, Data) ->
     handle_event({call, From}, Event, task_running, Data);
 task_running(cast, {task_runnable, TaskRef, ConfirmTask},
-             Data=#data{running_task=TaskRef, task_infos=TaskInfos,
+             _Data=#data{running_task=TaskRef, task_infos=TaskInfos,
                         dcref=DCRef}) ->
     %% This can happen when a process suspends itself ({token, Id, runnable})
     %% or when we schedule a newly-created process.  In both cases we might
@@ -1013,7 +1077,7 @@ task_running(cast, {task_blocked_for_resource,
     %% dc will call task_is_runnable as needed and/or register our blockedness
     dc:block_task_for_resource(DCRef, self(), TaskRef, RequestEvent),
     WaitReason=TaskInfo#task_info.wait_reason,
-    NewTaskState=register_waiting_task_if_necessary(WaitReason, DCRef, self(), TaskRef, blocked),
+    _NewTaskState=register_waiting_task_if_necessary(WaitReason, DCRef, self(), TaskRef, blocked),
     This=TaskInfo#task_info.this,
     NewObjectStates=update_object_state_map(This, ObjectState, ObjectStates),
     %% We never pass TaskInfo back to the process, so we can mutate it here.
@@ -1034,10 +1098,10 @@ task_running(cast, {task_blocked_for_resource,
                        object_states=NewObjectStates, task_infos=NewTaskInfos,
                        next_stable_id=N+1, recorded=[Event | Recorded]}}
     end;
-task_running(cast, {task_blocked_for_future, TaskRef, TaskInfo, ObjectState, Future},
+task_running(cast, {task_blocked_for_future, TaskRef, TaskInfo, ObjectState, _Future},
              Data=#data{gc_waiting_to_start=GCWaitingToStart,
                         task_infos=TaskInfos,object_states=ObjectStates,
-                        dc=DC, dcref=DCRef, replaying=Replaying}) ->
+                        dc=DC, dcref=DCRef, replaying=_Replaying}) ->
     WaitReason=TaskInfo#task_info.wait_reason,
     NewTaskState=register_waiting_task_if_necessary(WaitReason, DCRef, self(), TaskRef, blocked),
     This=TaskInfo#task_info.this,
@@ -1111,6 +1175,15 @@ task_running(cast, stop_world, Data=#data{running_task=R,gc_waiting_to_start=fal
     task:send_stop_for_gc(R),
     {keep_state,
      Data#data{next_state_after_gc=task_running, gc_waiting_to_start=true}};
+task_running(cast, {consume_resource_on_dc, _DCRef, _DCOid, _ConsumingCog, _ConsumingTask, _Resourcetype, _Amount_raw}, _Data) ->
+    %% This event is only sent to cogs who contain a DC object ()as
+    %% its sole object, since DCs can't be created via `new_local`.
+    %% We need to modify the dc object's state, so postpone resource
+    %% consumption until the running process (who will have the dc
+    %% object state checked out) has finished.  Note that all methods
+    %% on the class ABS.DC.DeploymentComponent are short and terminate
+    %% quickly.
+    {keep_state_and_data, [postpone]};
 task_running(info, {'EXIT',TaskRef,_Reason},
             Data=#data{gc_waiting_to_start=GCWaitingToStart,
                        running_task=R,runnable_tasks=Run,polling_tasks=Pol,
@@ -1152,7 +1225,7 @@ task_running(info, {'EXIT',TaskRef,_Reason},
                             #task_info{event=Event} = maps:get(T, NewTaskInfos),
                             #event{caller_id=Cid, local_id=Lid, name=Name} = Event,
                             NewRecorded = [#event{type=schedule, caller_id=Cid, local_id=Lid, name=Name} | Recorded],
-                            NewReplaying = case Replaying of [] -> []; [X | Rest] -> Rest end,
+                            NewReplaying = case Replaying of [] -> []; [_X | Rest] -> Rest end,
 
                             send_token(token, T, NewTaskInfos, ObjectStates),
                             {keep_state,
@@ -1316,7 +1389,7 @@ in_gc(cast, resume_world, Data=#data{running_task=RunningTask,
                             #task_info{event=Event} = maps:get(T, TaskInfos),
                             #event{caller_id=Cid, local_id=Lid, name=Name} = Event,
                             NewRecorded = [#event{type=schedule, caller_id=Cid, local_id=Lid, name=Name} | Recorded],
-                            NewReplaying = case Replaying of [] -> []; [X | Rest] -> Rest end,
+                            NewReplaying = case Replaying of [] -> []; [_X | Rest] -> Rest end,
 
                             dc:cog_active(DCRef, self()),
                             send_token(token, T, TaskInfos, ObjectStates),
@@ -1342,7 +1415,7 @@ in_gc(cast, resume_world, Data=#data{running_task=RunningTask,
                       Data#data{gc_waiting_to_start=false}}
             end
         end;
-in_gc(EventType, {'EXIT',TaskRef,_Reason},
+in_gc(_EventType, {'EXIT',TaskRef,_Reason},
             Data=#data{running_task=R,runnable_tasks=Run, polling_tasks=Pol,
                        waiting_tasks=Wai, new_tasks=New,
                        task_infos=TaskInfos}) ->

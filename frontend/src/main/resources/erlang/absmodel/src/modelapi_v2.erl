@@ -156,7 +156,7 @@ handle_object_call([Objectname, Methodname], Parameters, Req) ->
                     %% FIXME: we ignore the updated request `Req2'.  Hopefully
                     %% this won't matter since we don't attempt to read the
                     %% request body again (body can only be read once).
-                    {ok, Body, Req2} = case cowboy_req:has_body(Req) of
+                    {ok, Body, _Req2} = case cowboy_req:has_body(Req) of
                                false -> {ok, <<"[]">>, Req};
                                true -> cowboy_req:read_body(Req)
                            end,
@@ -391,16 +391,16 @@ construct_local_trace(LocalTrace) ->
 
 json_to_trace(JSON) ->
     RawTrace = jsx:decode(JSON, [{labels, atom}, return_maps]),
-    lists:foldl(fun (#{cog_id := Id, cog_schedule := LocalTrace}, Acc) ->
-                        maps:put(Id, construct_local_trace(LocalTrace), Acc)
+    lists:foldl(fun (#{node := Node, local_trace := LocalTrace}, Acc) ->
+                        maps:put(Node, construct_local_trace(LocalTrace), Acc)
                 end, #{}, RawTrace).
 
 json_to_scheduling_trace(JSON) ->
     Trace = json_to_trace(JSON),
-    maps:map(fun(Cog, LocalTrace) ->
-                     lists:filter(fun (E=#event{type=schedule}) -> true;
-                                      (E=#dc_event{}) -> true;
-                                      (E) -> false
+    maps:map(fun(_Cog, LocalTrace) ->
+                     lists:filter(fun (_E=#event{type=schedule}) -> true;
+                                      (_E=#dc_event{}) -> true;
+                                      (_E) -> false
                                   end, LocalTrace)
              end, Trace).
 
@@ -408,9 +408,9 @@ local_trace_to_json_friendly(LocalTrace) ->
     lists:map(fun event_to_map/1, LocalTrace).
 
 trace_to_json_friendly(Trace) ->
-    T = maps:fold(fun (CogId, LocalTrace, Acc) ->
-                          [#{cog_id => CogId,
-                             cog_schedule => local_trace_to_json_friendly(LocalTrace)}
+    T = maps:fold(fun (Node, LocalTrace, Acc) ->
+                          [#{node => Node,
+                             local_trace => local_trace_to_json_friendly(LocalTrace)}
                            | Acc]
                   end, [], Trace),
     lists:reverse(T).

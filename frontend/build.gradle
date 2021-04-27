@@ -5,7 +5,8 @@ plugins {
     id 'application'
 
     id 'antlr'
-    id "com.github.spotbugs" version "4.4.1"
+    id "com.github.spotbugs" version "4.6.0"
+    id 'com.github.johnrengelman.shadow'
 }
 
 configurations {
@@ -15,7 +16,8 @@ configurations {
 }
 
 application {
-    mainClassName = 'org.abs_models.frontend.parser.Main'
+    mainClass = 'org.abs_models.frontend.parser.Main'
+    mainClassName = 'org.abs_models.frontend.parser.Main' // for shadowJar
 }
 
 java {
@@ -23,16 +25,18 @@ java {
     withSourcesJar()
 }
 
+compileJava.options.encoding = 'UTF-8'
+
 distributions {
     main { distributionBaseName = 'absc' }
 }
 
 dependencies {
     // https://docs.gradle.org/current/userguide/java_plugin.html#sec:java_plugin_and_dependency_management
-    implementation 'commons-io:commons-io:2.7'
-    implementation 'com.google.guava:guava:29.0-jre'
+    implementation 'commons-io:commons-io:2.8.0'
+    implementation 'com.google.guava:guava:30.1.1-jre'
     implementation files('lib/choco-solver-2.1.1.jar')
-    implementation 'org.eclipse.jdt:ecj:3.22.0'
+    implementation 'org.eclipse.jdt:ecj:3.25.0'
     implementation 'org.apfloat:apfloat:1.9.1'
     // our code fails to compile with newer versions of sat4j; leaving this at
     // version 2.3.0 for now.
@@ -41,21 +45,21 @@ dependencies {
     implementation 'org.sat4j:org.sat4j.maxsat:2.3.0'
     implementation files('lib/semisolver.jar')
 
-    implementation 'info.picocli:picocli:4.3.2'
+    implementation 'info.picocli:picocli:4.6.1'
 
     compileOnly 'com.google.code.findbugs:jsr305:3.0.2'
 
     // Executes JUnit Jupiter (~JUnit 5) tests
-    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.6.2")
+    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.7.1")
     // Executes JUnit4 tests
-    testRuntimeOnly("org.junit.vintage:junit-vintage-engine:5.6.2")
-    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.6.2'
-    testImplementation 'junit:junit:4.13'
+    testRuntimeOnly("org.junit.vintage:junit-vintage-engine:5.7.1")
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.7.1'
+    testImplementation 'junit:junit:4.13.2'
     testImplementation 'com.eclipsesource.minimal-json:minimal-json:0.9.5'
     testImplementation 'org.hamcrest:hamcrest-core:2.2'
 
-    jastadd2 'org.jastadd:jastadd:2.3.4'
-    antlr 'org.antlr:antlr4:4.8-1'
+    jastadd2 'org.jastadd:jastadd:2.3.5'
+    antlr 'org.antlr:antlr4:4.9.2'
 }
 
 // JastAdd
@@ -77,19 +81,21 @@ task generateJastAddAST(type: JavaExec) {
     args += "--o=$buildDir/generated-src/jastadd/main"
     args += '--rewrite=regular'
     args += '--visitCheck=false'
-    args += '--debug'
     args += '--package=org.abs_models.frontend.ast'
     args += fileTree(dir: 'src/main/java',
                      includes: ['**/*.ast', '**/*.jrag', '**/*.jadd']).files
 }
 sourceSets.main.java.srcDir "$buildDir/generated-src/jastadd/main"
 compileJava.dependsOn 'generateJastAddAST'
+compileJava.options.encoding = 'UTF-8'
+sourcesJar.dependsOn 'generateJastAddAST'
 
 // antlr
 generateGrammarSource {
     arguments += [ '-package', 'org.abs_models.frontend.antlr.parser' ]
 }
 compileJava.dependsOn 'generateGrammarSource'
+sourcesJar.dependsOn 'generateGrammarSource'
 
 // erlang
 
@@ -122,6 +128,12 @@ clean {
 }
 jar.dependsOn 'compileErlangBackend'
 
+tasks.withType(AbstractArchiveTask) {
+    // Try to create reproducible builds
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+}
+
 // jar
 jar {
     // https://docs.gradle.org/current/dsl/org.gradle.api.tasks.bundling.Jar.html
@@ -138,19 +150,16 @@ jar {
             // getVersion and getSpecificationVersion)
             'Specification-Version': project.version
     }
-    from configurations.runtimeClasspath
-        .findAll { it.name.endsWith('jar') }
-        .collect { zipTree(it) }
-    // Avoid problems with signed jar dependencies -- see
-    // https://stackoverflow.com/a/34856095/564395
-    excludes = [ 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA' ]
-    reproducibleFileOrder=true
+}
+
+shadowJar {
+    
 }
 
 // this is necessary for the `absc` scripts
-task plainJar(type: Copy, dependsOn: jar) {
-    description 'Copies absfrontend.jar into its documented location.'
-    from jar.archiveFile
+task plainJar(type: Copy, dependsOn: shadowJar) {
+    description 'Copies the combined jar into its documented location.'
+    from shadowJar.archiveFile
     into 'dist'
     rename '(.*).jar', 'absfrontend.jar'
 }
@@ -220,6 +229,7 @@ spotbugsTest {
 }
 
 javadoc {
+    options.encoding = 'UTF-8'
     failOnError = false
     options.addStringOption('Xdoclint:none', '-quiet')
     options.tags = [ 'apilevel', 'declaredat', 'aspect', 'ast', 'attribute',
